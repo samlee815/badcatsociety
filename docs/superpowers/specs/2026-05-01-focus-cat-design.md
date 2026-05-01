@@ -7,7 +7,9 @@
 
 ## 1. What this is
 
-A cross-platform desktop app that runs user-initiated focus sessions. During a session, an animated 3D cat lives in a small always-on-top overlay window. If the user drifts to a distracting app, the cat reacts on an escalating ladder — from a subtle stare up to a full slap-cat slap and a crying-cat end-screen. Each session ends with a shareable result card.
+A cross-platform desktop app that runs user-initiated focus sessions. During a session, an animated **2D cat** lives in a small always-on-top overlay window. The cat runs two complementary tracks: a **negative escalation ladder** (when the user drifts to distractions, escalating from a subtle stare to a full slap and an end-of-session crying-cat) and a **positive reward ladder** (when the user stays focused for extended periods, the cat does encouraging pat-pats and celebrations). Each session ends with a shareable result card with one-click share buttons for X, Reddit, and Discord.
+
+> **Spec amendment (2026-05-01):** mascot switched from 3D to 2D — simpler pipeline, faster ship, lighter runtime. Positive reward ladder added. Sharing channels elevated from generic share-sheet to explicit X / Reddit / Discord buttons.
 
 The product positioning is a polished side project ("viral side project, B-now-with-C-alive" path): ship fast for the launch wave, but architect so a paid Pro tier with webcam-based eye tracking can drop in later without rework.
 
@@ -16,8 +18,10 @@ The product positioning is a polished side project ("viral side project, B-now-w
 ### Goals
 
 - A focus tool that is *fun*, not nagging — every interaction is meant to be screenshotable.
+- **Both punishment and praise** — a slap ladder for drift, a reward ladder for sustained focus. Pure-negative reinforcement makes a sad product; the cat should be rooting for you.
 - Detection that respects passive work (reading, watching lectures, taking handwritten notes).
-- 3D animated mascot that references famous cat memes through animation, not by reproducing meme images directly.
+- 2D animated mascot that references famous cat memes through animation, not by reproducing meme images directly.
+- One-click share to X, Reddit, and Discord — not a generic OS share sheet.
 - Free stack throughout v1, including assets.
 - Cross-platform from day 1 (macOS + Windows), Linux best-effort.
 - Architecture that allows a v2 webcam gaze-tracking signal to drop in as a plugin.
@@ -93,9 +97,11 @@ The engine ticks at ~1 Hz. Each tick:
 3. Update escalation state machine (see §6).
 4. Emit any cat-reaction events to the renderer.
 
-## 6. Escalation ladder (the slap experience)
+## 6. Reaction ladders (slap *and* praise)
 
-### During-session tiers (Tier 0–5)
+The cat runs two ladders concurrently during a session: a **negative escalation ladder** for drift, and a **positive reward ladder** for sustained focus. They share the same overlay surface — only one cat animation plays at a time — but they're triggered independently.
+
+### Negative ladder — during-session tiers (Tier 0–5)
 
 | Tier | Name | Trigger | Cat behavior | Sound | Meme reference |
 |---|---|---|---|---|---|
@@ -107,6 +113,21 @@ The engine ticks at ~1 Hz. Each tick:
 | 5 | Outrage | 4+ infractions in one session | Sprints across screen, hissing, fur puffed, "STOP IT" / "i am once again asking" overlay | Hiss + scream-meow | Woman-yelling-at-cat overlay + screaming cat |
 
 Tier 5 is the maximum during-session response. The "crying cat" is reserved for the end-of-session post-mortem, below.
+
+### Positive ladder — reward events during a session
+
+The cat actively cheers you on when you sustain focus. Reward events fire based on cumulative *clean* time during the session (time spent in WORK apps, excluding idle and distraction).
+
+| Reward tier | Trigger | Cat reaction | Sound |
+|---|---|---|---|
+| R1 — Pat-pat | 5 min of cumulative clean focus | Cat reaches over and gently pats screen edge (encouraging, friendly) | Soft chirrup |
+| R2 — Thumbs-up | 15 min cumulative clean focus | Cat sits up, gives a paw thumbs-up, brief sparkle | Bright meow |
+| R3 — Celebration | 30 min cumulative clean focus | Cat does a happy spin / wiggle, "you got this 🌟" overlay | Triumphant meow |
+| R4 — Reverence | 60 min cumulative clean focus | Cat bows respectfully, "absolute legend" overlay | Slow purr |
+
+Reward events are **not blocked** by escalation events — they fire on their own clean-time threshold. But: clean-time accumulator **resets on any SLAP-tier infraction** (not on lower-tier drift). Logic: drifting briefly is human; getting actually slapped means you broke focus. After a SLAP, you start earning rewards over again.
+
+This creates a clear emotional loop: drift → cat slaps → recover → keep going → cat rewards. Both directions are screenshotable.
 
 ### End-of-session reactions (the share moment)
 
@@ -124,41 +145,85 @@ Tier 5 is the maximum during-session response. The "crying cat" is reserved for 
 - **Snooze cat exists** but costs the streak. Honest opt-out, not silent disable. Surfaces a small "you skipped" mark on the share card.
 - **No haptic, no screen-takeover, no audio above 60% volume.** This is a fun nag, not punishment.
 
-## 7. Mascot pipeline (free stack)
+## 7. Mascot pipeline (2D, free stack)
 
-The mascot is a 3D animated character. Path 2 from the brainstorm — **stock CC0 base + custom**:
+The mascot is a **2D animated character**, authored as a single Rive state-machine file (`.riv`) with all reactions as named states/animations. Rendered in the overlay window via `@rive-app/canvas` or `@rive-app/react-canvas`.
 
-1. Start from **Quaternius's CC0 animal pack** (poly.pizza / quaternius.com) — has rigged stylized cat with idle/walk/attack animations as a starting baseline.
-2. Customize in Blender — re-texture, adjust proportions, restyle for distinct identity.
-3. Hand-keyframe ~12 short animation clips covering all 7 ladder tiers + 4 end-of-session reactions (some shared keyframes — Tier 4 SLAP and the "rough" end-screen can share base motion).
-4. Export to glTF (`.glb`) for Three.js consumption.
-5. Render in a transparent always-on-top Tauri window via Three.js + react-three-fiber.
+### Why Rive
 
-### Meme references in 3D
+| Tool | Verdict |
+|---|---|
+| **Rive** | ✅ **Pick.** Free authoring tool, free runtime, native web playback, single `.riv` asset bundles all states + transitions, smooth skeletal 2D animation, ~50–500 KB per character. Built for product mascots. |
+| Lottie | ✅ Solid alternative — author in After Effects (paid) or LottieFiles' free editor; single JSON per animation, but state transitions less elegant than Rive. |
+| SVG + CSS animations | ✅ Absolute zero-tool path. Hand-author cat in SVG, animate state changes with CSS transitions/keyframes. Most flexible, hardest to make smooth. |
+| Sprite sheets (PNG frames) | 🟡 Works, but big files and frame-by-frame authoring is tedious. |
+| Live2D Cubism | 🟡 VTuber-grade rigging, more expressive but more authoring work. Overkill for v1. |
+| GIF | ❌ Heavy, no interactivity, dated feel. |
 
-Memes referenced through *animation poses and silhouettes*, not by overlaying meme images. Examples:
-- Tier 4 SLAP — paw raised in chom-chom slap-cat silhouette before strike.
-- Tier 5 Outrage — text overlay quotes the woman-yelling-at-cat meme; cat motion is the screaming cat reaction.
-- Tier 6 Crying — pose mimics the crying cat photo silhouette.
+**Pick: Rive** for v1. Authoring tool is genuinely good (free), runtime is web-native (`@rive-app/react-canvas`), and the state-machine model maps 1:1 to our reaction tiers (negative ladder + positive ladder = states; transitions = inputs from the engine).
 
-This is the C-with-AI mascot strategy locked in earlier — *meme-shaped* poses on your character, no third-party meme images shipped.
+### Animation list (single Rive file)
+
+The `.riv` file contains all of these as named animations, driven by inputs from the engine:
+
+| State | Source | Notes |
+|---|---|---|
+| `idle_breath` | Negative Tier 0 (default) | Loop. Cat sitting calmly, ear twitch, slow blink. |
+| `alert` | Negative Tier 1 | Quick head-up, eyes open, ears perk. |
+| `stare` | Negative Tier 2 | Sit upright, narrowed eyes, tail swish loop. |
+| `paw_tap` | Negative Tier 3 | Lean in, soft screen tap. |
+| `slap` | Negative Tier 4 | Chom-chom slap motion. The big one. |
+| `outrage` | Negative Tier 5 | Hiss + sprint, fur puffed. |
+| `pat_pat` | Reward R1 | Reach over, gentle screen pat. Encouraging. |
+| `thumbs_up` | Reward R2 | Sit up, paw thumbs-up, sparkle. |
+| `celebration` | Reward R3 | Happy spin / wiggle. |
+| `reverence` | Reward R4 | Slow respectful bow. |
+| `nap` | Idle 5+ min | Curled up, slow breathing. |
+| `stretch` | End-of-session: clean | Big content stretch. |
+| `headbutt` | End-of-session: decent | "You tried" headbutt. |
+| `side_eye` | End-of-session: rough | Judgmental side-eye, tail flick. |
+| `crying` | End-of-session: disaster | Single tear, slow head-down. (Crying cat reference.) |
+
+15 animations in one file. Realistic to author in Rive in ~3–5 days for a competent illustrator/animator, faster with reused base motion.
+
+### Bootstrap path (free)
+
+1. Design the cat character on paper or in Procreate / Figma — single canonical pose, color, vibe. (Half-day.)
+2. Open Rive (free at rive.app), import the canonical drawing as bones / vector layers.
+3. Build the state machine and 15 named animations. Reuse base motion across related states (e.g., `slap` and `outrage` share approach motion).
+4. Export `.riv`, drop into `assets/cat/whiskers.riv`.
+5. In React: `<RiveCanvas src="whiskers.riv" stateMachine="cat" />`, drive state via inputs that the engine sends.
+
+If you don't want to author yourself: commission a Rive cat on Fiverr / Behance for $100–400 with full source `.riv` file.
+
+### Meme references in 2D
+
+Memes referenced through *animation poses* and the static end-screen card art — not by republishing third-party meme images.
+
+- `slap` references chom-chom slap cat silhouette and pose timing.
+- `outrage` text overlay quotes "i am once again asking" / woman-yelling-at-cat phrasing.
+- `crying` mimics crying-cat photo silhouette.
+- `side_eye` references the side-eye cat meme.
 
 ### Tools (all free)
 
 | Stage | Tool |
 |---|---|
-| Source assets | Quaternius CC0 cat pack |
-| Modeling / rigging / animation | Blender (free, open source) |
-| Optional AI texture generation | Flux Dev via HuggingFace Spaces or local |
-| Asset format | glTF / glb |
-| Audio | royalty-free meow / hiss / slap SFX (freesound.org or generate) |
+| Character design | Procreate ($13 one-time) or Figma (free) or Inkscape (free) |
+| Authoring | **Rive** (free editor, free runtime) |
+| Asset format | `.riv` file (~50–500 KB total) |
+| Audio | royalty-free meow / hiss / slap / pat / chirrup SFX (freesound.org) |
+| Frontend integration | `@rive-app/react-canvas` (free, open source) |
 
 ### Mascot effort estimate
 
-- Day 1: drop Quaternius cat into Three.js + Tauri overlay window, verify pipeline.
-- Week 1 (during build): re-texture, restyle, basic animations for tiers 0–3.
-- Week 2: animate tiers 4–6 + end-of-session reactions.
-- Week 3: polish, lip-sync sounds to animations, share-card design.
+- Day 1: design canonical cat character, finalize palette + proportions.
+- Day 2–3: build Rive state machine + bones, author idle / alert / stare / nap base loops.
+- Day 4–5: author slap / paw_tap / outrage + the four reward states.
+- Day 6–7: author end-of-session states + share-card art.
+- Day 8: polish, integration into React, smoke-test all transitions.
+
+Total: ~1 to 1.5 weeks of focused work. Significantly less than the 3D pipeline (3+ weeks).
 
 ## 8. Tech stack
 
@@ -166,13 +231,15 @@ This is the C-with-AI mascot strategy locked in earlier — *meme-shaped* poses 
 |---|---|
 | Desktop shell | Tauri 2.x (Rust backend, native webview) |
 | Frontend framework | Vite + React + TypeScript |
-| 3D rendering | Three.js + react-three-fiber |
-| State (frontend) | Zustand or Redux Toolkit |
+| **Mascot rendering** | **Rive (`@rive-app/react-canvas`)** — single `.riv` state-machine file |
+| State (frontend) | Zustand |
 | Active-window detection | `active-win-pos-rs` Rust crate |
 | Window-title via Accessibility | macOS: `objc2` bridge to `AXUIElement`; Windows: `GetWindowTextW` |
 | Idle detection | `user-idle` Rust crate |
-| Local storage | SQLite via `tauri-plugin-sql` |
+| Local storage | SQLite via direct `sqlx` use (Rust-owned) |
 | Audio | HTMLAudioElement in webview |
+| Share-card rendering | HTML `<canvas>` + `html-to-image` (or pure canvas drawing) → PNG blob |
+| Sharing | Direct deep-links — `twitter.com/intent/tweet`, `reddit.com/submit`, Discord webhook URL (user-configured) |
 | Build / packaging | Tauri's built-in bundler |
 | Distribution | GitHub Releases (free); Apple Developer Program ($99/yr) for macOS notarization |
 
@@ -204,16 +271,17 @@ Rust selected for the backend because:
 
 - **`MenubarPopup`** — session config, start button.
 - **`SessionConfig`** — duration picker, work-app override.
-- **`Settings`** — app classifications editor, mute/snooze, sound preferences, mascot tweaks (positioning corner, scale).
-- **`CatOverlay`** — the transparent always-on-top window's contents: `<Canvas>` from r3f containing `CatModel` and `EffectsLayer` (text overlays, screen-shake, etc.).
-- **`CatModel`** — loads `.glb`, manages animation clip mixer, exposes a `play(tier)` method.
-- **`ShareCard`** — generated PNG composer for end-of-session.
+- **`Settings`** — app classifications editor, mute/snooze, sound preferences, mascot tweaks (positioning corner, scale), Discord webhook URL.
+- **`CatOverlay`** — the transparent always-on-top window's contents: a `<RiveCanvas>` containing the cat + an `EffectsLayer` for text overlays (e.g., the "SLAP!" / "you got this 🌟" comic-text).
+- **`CatRive`** — wraps `useRive`, holds inputs that the engine drives (negative tier, reward tier, end-state), drives the named animations.
+- **`ShareCard`** — `<canvas>` PNG composer for end-of-session, with three explicit share buttons (X / Reddit / Discord) plus copy/save fallbacks.
 
 ### IPC events (renderer ← engine)
 
 - `session:started` — duration, start time
-- `session:tick` — current tier, elapsed, infraction count
-- `cat:react` — tier number, reason (which signal triggered)
+- `session:tick` — current negative tier, current reward tier, elapsed, infraction count, clean-time accumulator
+- `cat:react` — negative tier number, reason (which signal triggered)
+- `cat:reward` — reward tier number (R1–R4), reason
 - `cat:ask-classification` — for unclassified app prompt
 - `session:ended` — final stats for share card
 
@@ -259,6 +327,13 @@ CREATE TABLE infractions (
   tier_reached INTEGER NOT NULL
 );
 
+CREATE TABLE rewards (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  occurred_at INTEGER NOT NULL,
+  reward_tier INTEGER NOT NULL CHECK (reward_tier BETWEEN 1 AND 4)
+);
+
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -272,12 +347,30 @@ CREATE TABLE streaks (
 );
 ```
 
-## 11. Privacy and permissions
+## 11. Privacy, permissions, and sharing
 
-- **All data stays on-device.** No telemetry, no cloud, no analytics in v1. The share button explicitly creates a PNG locally and hands it to the OS share sheet — the app never makes a network call without explicit user action.
+- **All data stays on-device by default.** No telemetry, no cloud, no analytics in v1.
+- **Sharing is explicit user action only.** When the user clicks "Share to X / Reddit / Discord", the app:
+  - Renders the share-card PNG locally in a `<canvas>`.
+  - Copies the PNG to the system clipboard.
+  - Opens the relevant intent URL in the user's default browser:
+    - **X:** `https://twitter.com/intent/tweet?text=<encoded-caption>&url=<badcatsociety-site>`
+    - **Reddit:** `https://www.reddit.com/submit?title=<encoded-title>&url=<badcatsociety-site>`
+    - **Discord:** posts the PNG + caption to a user-configured Discord webhook URL (the only direct API call the app ever makes — and only when the user has explicitly set up a webhook in Settings).
+  - The user manually attaches the (already-on-clipboard) PNG. App makes no other network calls.
 - **macOS Accessibility permission** is requested once on first run, with a clear explanation: "Whiskers needs to read window titles to know when you've drifted." Without it, the app falls back to active-app-only detection (still functional, less precise).
 - **Webcam (v2 only):** when implemented, runs ML on-device exclusively. No video frames or gaze data leave the machine.
 - **Privacy policy** explicit on the site at launch even though there's nothing to disclose — sets the tone for the C-path Pro tier.
+
+### Share-card visual
+
+The share-card PNG (1080×1080, square — fits all three target platforms) renders client-side via `<canvas>`. It contains:
+- Cat in the appropriate end-of-session pose (stretch / headbutt / side-eye / crying), exported as a PNG snapshot from the Rive runtime.
+- Stats: duration, infractions, current streak, list of distracting apps caught.
+- Verdict line ("I disappointed Whiskers today" / "Clean run! 🌟" etc.).
+- Footer: `badcatsociety.app · 🐈‍⬛`.
+
+A pre-canned caption is also generated for each platform with appropriate hashtags / formatting (e.g., on Reddit, suggests posting in r/productivity or r/getdisciplined).
 
 ## 12. Distribution
 
@@ -290,6 +383,7 @@ CREATE TABLE streaks (
 
 What is *not* in v1, listed so the implementation plan can stay tight:
 
+- 3D rendering of any kind (we picked 2D Rive)
 - Calendar integration
 - Browser URL detection (window title is enough)
 - Webcam / gaze tracking
@@ -300,15 +394,17 @@ What is *not* in v1, listed so the implementation plan can stay tight:
 - Team features
 - AI-generated session reports
 - Internationalization (English-only at launch; copy is light)
+- Programmatic posting to X or Reddit (would require user OAuth; v1 uses intent URLs + clipboard handoff instead). Discord webhook IS a direct post but only when the user explicitly configures a webhook URL.
 
 ## 14. Roadmap
 
 **v1 (this spec) — viral launch.**
 - Pomodoro focus sessions
-- 7-tier escalation ladder
-- 3D animated cat with meme-referenced poses
+- 6-tier negative escalation ladder + 4-tier positive reward ladder
+- **2D animated cat (Rive)** with meme-referenced poses
 - Active-app + window-title + idle detection
-- Local SQLite, no cloud
+- Local SQLite, no cloud (except optional user-configured Discord webhook)
+- One-click share to X / Reddit / Discord
 - macOS + Windows, Linux best-effort
 
 **v1.1–v1.5 (post-launch iteration).**
@@ -330,15 +426,19 @@ What is *not* in v1, listed so the implementation plan can stay tight:
 - Default `DISTRACTION` seed list — curated by us or empty? (Lean: small curated default, fully editable.)
 - Linux support level — best-effort or first-class? (Currently best-effort.)
 - Does the snooze button cost the *current session's* result or the cross-session *streak*? (Lean: current session marked "snoozed" + breaks streak.)
+- Reward thresholds — currently 5 / 15 / 30 / 60 min cumulative clean. These are guesses; may need tuning after first usage data.
+- Share captions — auto-generated per result tier and per platform. Snarky? Earnest? Both? (Lean: snarky for negative results, earnest for clean runs.)
+- Discord webhook setup UX — do we ship a guide, or assume users who configure webhooks know how?
 
 ## 16. Risks and mitigations
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| 3D cat looks generic (Quaternius-derived) | Medium | Customize textures + proportions in Blender; build distinct silhouette |
-| Battery drain from Three.js + 1Hz polling | Low–Medium | Lower frame rate when at Tier 0; throttle scene rendering when overlay is idle |
+| Rive authoring takes longer than estimated for non-animator | Medium | Commission `.riv` from Fiverr ($100–400) as fallback; keep negotiable scope on number of distinct animations |
+| Battery drain from Rive + 1Hz polling | Low | Rive runtime is light; pause animation when at idle nap state |
 | Accessibility permission rejection on macOS | Medium | App still works (less precision); UI explicitly explains and points to System Settings |
-| Cat feels too aggressive / off-putting | Medium | Default sound off; gradual de-escalation; snooze always available |
+| Cat feels too aggressive / off-putting | Medium | **Reward ladder mitigates this directly** — the cat is rooting for you, not just punishing. Default sound off; gradual de-escalation; snooze always available |
+| Sharing intent URLs require manual image attach | Medium | Make the clipboard handoff loud and obvious — "Image copied! Paste in the post →" inline guidance after share click |
 | Tauri ecosystem gap forces Rust deep-dive | Low | Pre-validated crates exist for every v1 signal; only the Accessibility bridge needs custom glue |
 
 ---

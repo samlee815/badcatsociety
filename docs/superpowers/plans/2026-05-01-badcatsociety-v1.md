@@ -2,19 +2,20 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a working Tauri desktop app that runs user-declared focus sessions, detects active apps, classifies them, escalates a 6-tier reaction state, and shows the current tier in a small always-on-top overlay window. Uses a placeholder visual (colored tier badge) instead of the 3D cat — that ships in Plan 2.
+**Goal:** Build a working Tauri desktop app that runs user-declared focus sessions, detects active apps, classifies them, advances both a 6-tier negative escalation ladder *and* a 4-tier positive reward ladder, and shows the current state in a small always-on-top overlay window. Uses a placeholder visual (colored tier badge) instead of the 2D Rive cat — that ships in Plan 2.
 
-**Architecture:** Rust backend owns the focus engine: a tokio broadcast `SignalBus` collects observations from pluggable detection signal implementations (`ForegroundSignal`, `IdleSignal`), an `AppClassifier` buckets each observation into WORK / DISTRACTION / UNCLASSIFIED, and an `EscalationStateMachine` advances tiers per the spec's rules. The `SessionController` owns the lifecycle (start / tick / snooze / end) and persists everything to SQLite via sqlx. Two Tauri windows: a popup for session config and a transparent always-on-top overlay for the tier badge. IPC is typed events emitted from Rust → React, plus typed `#[tauri::command]` calls React → Rust.
+**Architecture:** Rust backend owns the focus engine: a tokio broadcast `SignalBus` collects observations from pluggable detection signal implementations (`ForegroundSignal`, `IdleSignal`), an `AppClassifier` buckets each observation into WORK / DISTRACTION / UNCLASSIFIED, and an `EscalationStateMachine` advances both ladders per the spec's rules (negative tier from distraction time, reward tier from cumulative clean focus time). The `SessionController` owns the lifecycle (start / tick / snooze / end) and persists sessions, infractions, rewards, and streaks to SQLite via sqlx. Two Tauri windows: a popup for session config and a transparent always-on-top overlay for the tier badge. IPC is typed events emitted from Rust → React, plus typed `#[tauri::command]` calls React → Rust.
 
 **Tech Stack:** Rust 2021 / Tauri 2.x / sqlx (sqlite) / tokio / active-win-pos-rs / user-idle / Vite + React 18 + TypeScript / Zustand.
 
+> **Spec amendment (2026-05-01) reflected in this plan:** mascot direction switched 3D→2D, positive reward ladder added (R1 pat-pat / R2 thumbs-up / R3 celebration / R4 reverence), share-card sharing channels (X / Reddit / Discord) elevated. Reward ladder is implemented in this plan; the 2D Rive cat and the share-card with platform buttons are deferred to follow-up plans (the placeholder TierBadge in this plan visualizes both ladders).
+
 **Scope deferred to follow-up plans:**
-- 3D Three.js cat with Quaternius model (Plan 2)
+- **2D Rive cat** with all named animations + audio (Plan 2)
 - macOS Accessibility bridge for hard-to-read window titles (Plan 2)
-- Audio (Plan 2)
 - Default DISTRACTION seed list (Plan 3 — needs the settings UI to be useful)
-- Share-card PNG generator (Plan 3)
-- Settings UI for editing classifications, mute, scope=SESSION classifications, snooze button (Plan 3)
+- **Share-card PNG generator + X/Reddit/Discord share buttons** (Plan 3)
+- Settings UI for editing classifications, mute, scope=SESSION classifications, snooze button, Discord webhook URL (Plan 3)
 - Distribution / signing / GitHub Actions (Plan 4)
 
 What this plan ships: a working desktop app where you start a focus session, the app polls your foreground app once a second, asks you "is this real work?" the first time it sees an unfamiliar app, slaps you (visually, via tier escalation in the overlay) when you switch to a distraction, and shows a session summary at the end.
@@ -226,6 +227,13 @@ CREATE TABLE infractions (
   app_id TEXT NOT NULL,
   title TEXT,
   tier_reached INTEGER NOT NULL
+);
+
+CREATE TABLE rewards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  occurred_at INTEGER NOT NULL,
+  reward_tier INTEGER NOT NULL CHECK (reward_tier BETWEEN 1 AND 4)
 );
 
 CREATE TABLE settings (
@@ -742,6 +750,20 @@ pub async fn record_infraction(
     Ok(())
 }
 
+pub async fn record_reward(
+    pool: &SqlitePool,
+    session_id: i64,
+    occurred_at: i64,
+    reward_tier: u8,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO rewards (session_id, occurred_at, reward_tier) VALUES (?, ?, ?)"
+    )
+    .bind(session_id).bind(occurred_at).bind(reward_tier as i64)
+    .execute(pool).await?;
+    Ok(())
+}
+
 pub async fn current_streak(pool: &SqlitePool) -> Result<(i64, i64), sqlx::Error> {
     let row: (i64, i64) = sqlx::query_as("SELECT current, best FROM streaks WHERE id = 1")
         .fetch_one(pool).await?;
@@ -809,6 +831,17 @@ mod tests {
         assert_eq!((s1, s2, s3), (1, 2, 0));
     }
 
+    #[tokio::test]
+    async fn rewards_persist_per_session() {
+        let pool = db::open_in_memory().await.unwrap();
+        let id = create_session(&pool, 1000, 1500).await.unwrap();
+        record_reward(&pool, id, 1100, 1).await.unwrap();
+        record_reward(&pool, id, 2000, 2).await.unwrap();
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rewards WHERE session_id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count.0, 2);
+    }
+
     #[test]
     fn result_classification_thresholds() {
         assert_eq!(Result_::from_infraction_count(0, false), Result_::Clean);
@@ -832,13 +865,13 @@ pub mod repo;
 - [ ] **Step 3: Run the tests**
 
 Run: `cd src-tauri && cargo test --lib repo`
-Expected: 5 tests PASS.
+Expected: 6 tests PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/focus_engine
-git commit -m "feat(engine): SQLite repo for classifications, sessions, infractions, streaks"
+git commit -m "feat(engine): SQLite repo for classifications, sessions, infractions, rewards, streaks"
 ```
 
 ---
@@ -997,12 +1030,23 @@ const ESCALATION_THRESHOLDS_SECS: [u64; 6] = [0, 0, 5, 15, 30, 60];
 const DE_ESCALATE_AFTER_CLEAN_SECS: u64 = 30;
 const IDLE_NAP_SECS: u64 = 5 * 60;
 
+/// Reward thresholds in cumulative clean-focus seconds. Index 0 → R1 (5min),
+/// 1 → R2 (15min), 2 → R3 (30min), 3 → R4 (60min). See spec §6 reward ladder.
+const REWARD_THRESHOLDS_SECS: [u64; 4] = [5 * 60, 15 * 60, 30 * 60, 60 * 60];
+
 #[derive(Debug, Clone)]
 pub struct EscalationState {
     pub tier: Tier,
     pub time_in_distraction_secs: u64,
     pub time_clean_secs: u64,
     pub session_infractions: u32,
+    /// Cumulative clean-focus time within the current session.
+    /// Increments only when classification is Work and user is not idle.
+    /// Resets to 0 on a SLAP infraction (not on lower-tier drift).
+    pub clean_focus_secs: u64,
+    /// Index into REWARD_THRESHOLDS_SECS pointing at the next reward to fire.
+    /// Resets to 0 on SLAP infraction (re-earn rewards from R1).
+    pub next_reward_idx: usize,
 }
 
 impl Default for EscalationState {
@@ -1012,6 +1056,8 @@ impl Default for EscalationState {
             time_in_distraction_secs: 0,
             time_clean_secs: 0,
             session_infractions: 0,
+            clean_focus_secs: 0,
+            next_reward_idx: 0,
         }
     }
 }
@@ -1021,6 +1067,7 @@ pub enum TickOutcome {
     NoChange { tier: Tier },
     TierChanged { from: Tier, to: Tier, reason: TickReason },
     Infraction { tier: Tier },
+    Reward { reward_tier: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1038,6 +1085,7 @@ pub fn tick(
         state.time_in_distraction_secs = 0;
         state.time_clean_secs = state.time_clean_secs.saturating_add(elapsed_since_last_tick_secs);
         state.tier = Tier::Napping;
+        // Idle does NOT count as clean focus (user is away). Don't increment clean_focus_secs.
         return outcome(prev_tier, state.tier, TickReason::Idle);
     }
 
@@ -1046,6 +1094,17 @@ pub fn tick(
             state.time_in_distraction_secs = 0;
             state.time_clean_secs = state.time_clean_secs.saturating_add(elapsed_since_last_tick_secs);
             state.tier = de_escalate(state.tier, state.time_clean_secs);
+
+            // Reward ladder: increment cumulative clean-focus time, fire reward on threshold cross.
+            state.clean_focus_secs = state.clean_focus_secs.saturating_add(elapsed_since_last_tick_secs);
+            if state.next_reward_idx < REWARD_THRESHOLDS_SECS.len()
+                && state.clean_focus_secs >= REWARD_THRESHOLDS_SECS[state.next_reward_idx]
+            {
+                let reward_tier = (state.next_reward_idx + 1) as u8; // R1..R4
+                state.next_reward_idx += 1;
+                return TickOutcome::Reward { reward_tier };
+            }
+
             outcome(prev_tier, state.tier, TickReason::Clean)
         }
         Classification::Unclassified => {
@@ -1054,6 +1113,7 @@ pub fn tick(
             if prev_tier == Tier::Napping {
                 state.tier = Tier::Alert;
             }
+            // Unclassified neither rewards nor punishes — just probes the user.
             outcome(prev_tier, state.tier, TickReason::Unclassified)
         }
         Classification::Distraction => {
@@ -1065,6 +1125,9 @@ pub fn tick(
             let crossed_into_slap = was_lower && new_tier.as_int() >= Tier::Slap.as_int();
             if crossed_into_slap {
                 state.session_infractions = state.session_infractions.saturating_add(1);
+                // SLAP wipes the reward progress — re-earn from R1.
+                state.clean_focus_secs = 0;
+                state.next_reward_idx = 0;
                 return TickOutcome::Infraction { tier: new_tier };
             }
             outcome(prev_tier, state.tier, TickReason::Distraction)
@@ -1142,6 +1205,44 @@ mod tests {
         tick(&mut s, Classification::Unclassified, 0, 5);
         assert_eq!(s.tier, Tier::Alert);
     }
+
+    #[test]
+    fn reward_fires_at_thresholds_and_advances_index() {
+        let mut s = EscalationState::default();
+        // 4:59 of clean focus — no reward yet.
+        let out = tick(&mut s, Classification::Work, 0, 299);
+        assert!(!matches!(out, TickOutcome::Reward { .. }));
+        assert_eq!(s.next_reward_idx, 0);
+        // Crossing 5min — R1 fires.
+        let out = tick(&mut s, Classification::Work, 0, 1);
+        assert!(matches!(out, TickOutcome::Reward { reward_tier: 1 }));
+        assert_eq!(s.next_reward_idx, 1);
+        // Big jump — should fire R2 next, not R3 (one reward per tick).
+        let out = tick(&mut s, Classification::Work, 0, 60 * 60);
+        assert!(matches!(out, TickOutcome::Reward { reward_tier: 2 }));
+    }
+
+    #[test]
+    fn slap_resets_reward_progress() {
+        let mut s = EscalationState::default();
+        tick(&mut s, Classification::Work, 0, 5 * 60); // R1 fires
+        assert_eq!(s.next_reward_idx, 1);
+        assert!(s.clean_focus_secs > 0);
+        // Now incur a SLAP.
+        let out = tick(&mut s, Classification::Distraction, 0, 35);
+        assert!(matches!(out, TickOutcome::Infraction { tier: Tier::Slap }));
+        assert_eq!(s.next_reward_idx, 0);
+        assert_eq!(s.clean_focus_secs, 0);
+    }
+
+    #[test]
+    fn idle_does_not_count_toward_reward_progress() {
+        let mut s = EscalationState::default();
+        // 5min idle should NOT trigger a reward.
+        let out = tick(&mut s, Classification::Work, 5 * 60, 5 * 60);
+        assert!(!matches!(out, TickOutcome::Reward { .. }));
+        assert_eq!(s.clean_focus_secs, 0);
+    }
 }
 ```
 
@@ -1159,13 +1260,13 @@ pub mod escalation;
 - [ ] **Step 3: Run the tests**
 
 Run: `cd src-tauri && cargo test --lib escalation`
-Expected: 5 tests PASS.
+Expected: 8 tests PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/focus_engine
-git commit -m "feat(engine): EscalationStateMachine with 6-tier ladder + de-escalation"
+git commit -m "feat(engine): negative escalation ladder + positive reward ladder"
 ```
 
 ---
@@ -1197,9 +1298,10 @@ use tokio::sync::Mutex;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
     Started { session_id: i64, duration_secs: i64 },
-    Tick { tier: u8, elapsed_secs: i64, infractions: u32 },
+    Tick { tier: u8, elapsed_secs: i64, infractions: u32, clean_focus_secs: u64 },
     AskClassify { app_id: String, title: Option<String> },
     Reaction { tier: u8, reason: String },
+    Reward { reward_tier: u8 },
     Ended { result: String, infractions: u32, ended_early: bool, streak: i64 },
 }
 
@@ -1288,6 +1390,14 @@ impl SessionController {
                     ).await;
                 }
             }
+            TickOutcome::Reward { reward_tier } => {
+                events.push(SessionEvent::Reward { reward_tier: *reward_tier });
+                if let Some(sid) = inner.session_id {
+                    let _ = repo::record_reward(
+                        &self.pool, sid, Utc::now().timestamp_millis(), *reward_tier
+                    ).await;
+                }
+            }
             TickOutcome::NoChange { .. } => {}
         }
 
@@ -1295,6 +1405,7 @@ impl SessionController {
             tier: inner.escalation.tier.as_int(),
             elapsed_secs,
             infractions: inner.escalation.session_infractions,
+            clean_focus_secs: inner.escalation.clean_focus_secs,
         });
 
         events
@@ -1375,6 +1486,18 @@ mod tests {
             assert_eq!(result, "CLEAN");
         } else { panic!("expected ended"); }
     }
+
+    #[tokio::test]
+    async fn sustained_work_emits_reward_and_persists() {
+        let pool = db::open_in_memory().await.unwrap();
+        repo::upsert_classification(&pool, "com.work.X", None, repo::Bucket::Work).await.unwrap();
+        let ctl = SessionController::new(pool.clone()).await.unwrap();
+        ctl.start(60 * 60).await.unwrap();
+        let evs = ctl.apply(obs_app("com.work.X", "doc"), 5 * 60).await;
+        assert!(evs.iter().any(|e| matches!(e, SessionEvent::Reward { reward_tier: 1 })));
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rewards").fetch_one(&pool).await.unwrap();
+        assert_eq!(count.0, 1);
+    }
 }
 ```
 
@@ -1393,13 +1516,13 @@ pub mod session;
 - [ ] **Step 3: Run the tests**
 
 Run: `cd src-tauri && cargo test --lib session`
-Expected: 3 tests PASS.
+Expected: 4 tests PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/focus_engine
-git commit -m "feat(engine): SessionController lifecycle + tick application"
+git commit -m "feat(engine): SessionController with infraction + reward persistence and emission"
 ```
 
 ---
@@ -1693,9 +1816,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type SessionEvent =
   | { kind: "started"; session_id: number; duration_secs: number }
-  | { kind: "tick"; tier: number; elapsed_secs: number; infractions: number }
+  | { kind: "tick"; tier: number; elapsed_secs: number; infractions: number; clean_focus_secs: number }
   | { kind: "ask_classify"; app_id: string; title: string | null }
   | { kind: "reaction"; tier: number; reason: string }
+  | { kind: "reward"; reward_tier: number }
   | { kind: "ended"; result: "CLEAN" | "DECENT" | "ROUGH" | "DISASTER"; infractions: number; ended_early: boolean; streak: number };
 
 export const startSession = (durationSecs: number) =>
@@ -1727,10 +1851,15 @@ interface State {
   elapsedSecs: number;
   durationSecs: number;
   infractions: number;
+  cleanFocusSecs: number;
+  /// Most recent reward tier shown (1..4); null if none yet this session.
+  /// We hold it briefly and clear after a few seconds so the overlay can flash a celebration.
+  activeReward: number | null;
   pendingClassify: { appId: string; title: string | null } | null;
   lastResult: Extract<SessionEvent, { kind: "ended" }> | null;
   setStatus: (s: SessionStatus) => void;
   applyEvent: (e: SessionEvent) => void;
+  clearReward: () => void;
   clearPending: () => void;
 }
 
@@ -1740,19 +1869,23 @@ export const useStore = create<State>((set) => ({
   elapsedSecs: 0,
   durationSecs: 0,
   infractions: 0,
+  cleanFocusSecs: 0,
+  activeReward: null,
   pendingClassify: null,
   lastResult: null,
   setStatus: (status) => set({ status }),
   applyEvent: (e) => set((s) => {
     switch (e.kind) {
-      case "started": return { status: "running", durationSecs: e.duration_secs, tier: 0, elapsedSecs: 0, infractions: 0, pendingClassify: null };
-      case "tick": return { tier: e.tier, elapsedSecs: e.elapsed_secs, infractions: e.infractions };
+      case "started": return { status: "running", durationSecs: e.duration_secs, tier: 0, elapsedSecs: 0, infractions: 0, cleanFocusSecs: 0, activeReward: null, pendingClassify: null };
+      case "tick": return { tier: e.tier, elapsedSecs: e.elapsed_secs, infractions: e.infractions, cleanFocusSecs: e.clean_focus_secs };
       case "ask_classify": return { pendingClassify: { appId: e.app_id, title: e.title } };
       case "reaction": return { tier: e.tier };
-      case "ended": return { status: "ended", lastResult: e };
+      case "reward": return { activeReward: e.reward_tier };
+      case "ended": return { status: "ended", lastResult: e, activeReward: null };
       default: return s;
     }
   }),
+  clearReward: () => set({ activeReward: null }),
   clearPending: () => set({ pendingClassify: null }),
 }));
 ```
@@ -2025,10 +2158,12 @@ export default function Overlay() {
 
 - [ ] **Step 3: Write TierBadge**
 
+`TierBadge` shows the negative tier by default, but when a reward fires it temporarily flashes the reward visual for 3 seconds before reverting. This is the placeholder version of the spec's negative + positive ladder duality — Plan 2 replaces the colored circle with the actual Rive cat playing the matching animation.
+
 Create `src/components/TierBadge.tsx`:
 
 ```tsx
-import React from "react";
+import React, { useEffect } from "react";
 import { useStore } from "../lib/store";
 
 const TIER_VISUAL: Record<number, { emoji: string; color: string; label: string }> = {
@@ -2040,11 +2175,31 @@ const TIER_VISUAL: Record<number, { emoji: string; color: string; label: string 
   5: { emoji: "🙀", color: "#db2777", label: "outrage" },
 };
 
+const REWARD_VISUAL: Record<number, { emoji: string; color: string; label: string }> = {
+  1: { emoji: "🐾", color: "#22c55e", label: "pat pat" },
+  2: { emoji: "👍", color: "#10b981", label: "thumbs up" },
+  3: { emoji: "🎉", color: "#06b6d4", label: "celebration" },
+  4: { emoji: "🙇", color: "#8b5cf6", label: "absolute legend" },
+};
+
 export function TierBadge() {
   const tier = useStore((s) => s.tier);
   const status = useStore((s) => s.status);
+  const activeReward = useStore((s) => s.activeReward);
+  const clearReward = useStore((s) => s.clearReward);
+
+  useEffect(() => {
+    if (activeReward == null) return;
+    const t = setTimeout(() => clearReward(), 3000);
+    return () => clearTimeout(t);
+  }, [activeReward, clearReward]);
+
   if (status !== "running") return null;
-  const v = TIER_VISUAL[tier] ?? TIER_VISUAL[0];
+
+  const v = activeReward != null
+    ? REWARD_VISUAL[activeReward]
+    : (TIER_VISUAL[tier] ?? TIER_VISUAL[0]);
+
   return (
     <div style={{
       width: 160, height: 160, borderRadius: "50%",
@@ -2052,6 +2207,7 @@ export function TierBadge() {
       alignItems: "center", justifyContent: "center",
       boxShadow: "0 12px 30px rgba(0,0,0,0.4)",
       transition: "background-color 250ms ease",
+      transform: activeReward != null ? "scale(1.1)" : "scale(1)",
     }}>
       <div style={{ fontSize: 64 }}>{v.emoji}</div>
       <div style={{ color: "#fff", fontWeight: 700, fontSize: 12, letterSpacing: 1, textTransform: "uppercase" }}>{v.label}</div>
@@ -2108,11 +2264,19 @@ Expected: two windows appear. Popup at top-left showing "Start a focus session".
 2. Switch to an app you've never opened with this app running (e.g., Notion, Calculator).
 3. Expected: a modal appears in the popup asking "is this real work?". Click Yes/No. The next time you switch to that app, no prompt.
 
-- [ ] **Step 5: Document any issues**
+- [ ] **Step 5: Manual scenario — reward fires after 5 minutes**
+
+1. Start a session of at least 10 minutes.
+2. Mark your IDE/terminal as Work via the prompt.
+3. Stay in it. Don't switch. Don't go idle.
+4. After 5 minutes of cumulative clean time, expected: the overlay badge briefly switches to the green "🐾 pat pat" visual for ~3 seconds, then reverts to napping. (In Plan 2 with the Rive cat, this will be an actual paw-pat animation.)
+5. Continue working. After 10 more minutes (15 total), expected: a "👍 thumbs up" reward flash.
+
+- [ ] **Step 6: Document any issues**
 
 If anything is broken, note it in `docs/superpowers/notes/v1-manual-test-issues.md` (create the file). Do **not** fix mid-test — just document.
 
-- [ ] **Step 6: Commit any test notes**
+- [ ] **Step 7: Commit any test notes**
 
 ```bash
 git add -A
@@ -2126,18 +2290,19 @@ git commit -m "docs: v1 manual test notes" --allow-empty
 After Phase 10, the app:
 
 - Has a working menubar popup window for session config.
-- Has a transparent always-on-top overlay window showing the current tier as a colored emoji badge (placeholder for the 3D cat).
+- Has a transparent always-on-top overlay window showing the current state as a colored emoji badge (placeholder for the 2D Rive cat).
 - Polls foreground app + idle every second.
 - Classifies apps WORK / DISTRACTION / UNCLASSIFIED, asks the user once when it sees something new, persists their answer.
-- Escalates through 6 tiers per the spec rules (Napping → Alert → Stare → PawTap → Slap → Outrage), with proper de-escalation on clean behavior.
-- Records infractions and full session results in SQLite.
+- Escalates through 6 negative tiers per the spec rules (Napping → Alert → Stare → PawTap → Slap → Outrage), with proper de-escalation on clean behavior.
+- Fires the 4-tier reward ladder (R1 pat-pat → R4 reverence) when cumulative clean focus time crosses 5 / 15 / 30 / 60 min thresholds. SLAP infractions reset reward progress.
+- Records infractions, rewards, and full session results in SQLite.
 - Tracks the cross-session streak.
 - Ends sessions cleanly with a verdict screen.
 
 What's still placeholder vs. spec:
-- Cat is a colored circle with an emoji. **Plan 2** swaps in Three.js + Quaternius cat with animation clips per tier.
-- No audio. **Plan 2** adds tier sounds.
-- No share-card PNG. **Plan 3** adds a `<canvas>`-based generator + share buttons.
-- No settings UI for editing classifications. **Plan 3** adds that.
+- Cat is a colored circle with an emoji. **Plan 2** swaps in the **2D Rive cat** with the 15 named animations (idle / alert / stare / paw_tap / slap / outrage / pat_pat / thumbs_up / celebration / reverence / nap / stretch / headbutt / side_eye / crying).
+- No audio. **Plan 2** adds tier and reward sounds.
+- No share-card PNG. **Plan 3** adds a `<canvas>`-based generator with explicit X / Reddit / Discord share buttons + clipboard handoff.
+- No settings UI for editing classifications, mute, or Discord webhook URL. **Plan 3** adds that.
 - No macOS Accessibility bridge for hard-to-read window titles. **Plan 2** adds it.
 - No code signing or installer polish. **Plan 4** does that for launch.
